@@ -170,12 +170,12 @@ class Residual(nn.Module):
     def __init__(self, in_channels, num_hiddens, num_residual_hiddens):
         super(Residual, self).__init__()
         self._block = nn.Sequential(
-            nn.ReLU(True),
+            nn.ReLU(),
             nn.Conv2d(in_channels=in_channels,
                       out_channels=num_residual_hiddens,
                       kernel_size=3, stride=1, padding=1, bias=False),
             nn.BatchNorm2d(num_residual_hiddens),
-            nn.ReLU(True),
+            nn.ReLU(),
             nn.Conv2d(in_channels=num_residual_hiddens,
                       out_channels=num_hiddens,
                       kernel_size=1, stride=1, bias=False),
@@ -209,7 +209,7 @@ class Encoder(nn.Module):
                                                   stride=2, 
                                                   padding=1),
                                         nn.BatchNorm2d(num_hiddens//2),
-                                        nn.ReLU(True)
+                                        nn.ReLU()
                                     ])
         self._conv_2 = nn.Sequential(*[
                                         nn.Conv2d(in_channels=num_hiddens//2,
@@ -218,7 +218,7 @@ class Encoder(nn.Module):
                                                   stride=2, 
                                                   padding=1),
                                         nn.BatchNorm2d(num_hiddens)
-                                        #nn.ReLU(True)
+                                        #nn.ReLU()
                                     ])
         self._residual_stack = ResidualStack(in_channels=num_hiddens,
                                              num_hiddens=num_hiddens,
@@ -242,14 +242,14 @@ class Decoder(nn.Module):
                                              num_residual_hiddens=num_residual_hiddens)
 
         self._conv_trans_2 = nn.Sequential(*[
-                                            nn.ReLU(True),
+                                            nn.ReLU(),
                                             nn.ConvTranspose2d(in_channels=num_hiddens,
                                                               out_channels=num_hiddens//2,
                                                               kernel_size=4,
                                                               stride=2,
                                                               padding=1),
                                             nn.BatchNorm2d(num_hiddens//2),
-                                            nn.ReLU(True)
+                                            nn.ReLU()
                                         ])
 
         self._conv_trans_1 = nn.Sequential(*[
@@ -259,7 +259,7 @@ class Decoder(nn.Module):
                                                               stride=2,
                                                               padding=1),
                                             nn.BatchNorm2d(num_hiddens//2),
-                                            nn.ReLU(True),                  
+                                            nn.ReLU(),                  
                                             nn.Conv2d(in_channels=num_hiddens//2,
                                                       out_channels=out_channels,
                                                       kernel_size=3,
