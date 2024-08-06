@@ -52,8 +52,10 @@ mkdir -p $DL_OUT
 # execute training: training must always be run
 #
 echo "... starting training on $1 ..."
-$DL_SCRIPTS/train.py $DL_MDL_PATH $1 $2 | tee $DL_OUT/00_train.log | \
-      grep "reading\|Step\|Average\|Warning\|Error" 
+python $DL_SCRIPTS/train.py $DL_MDL_PATH $1 $2 
+| tee $DL_OUT/00_train.log 
+| \
+      grep "reading\|Step\|Average\|Warning\|Error\|print" 
 echo "... finished training on $1 ..."
 
 #

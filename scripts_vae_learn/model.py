@@ -312,136 +312,163 @@ class VAE_Encoder(nn.Module):
         z_log_sd = self._encoder_z_log_sd(encoder_out)
         return z_mu, z_log_sd
 
-# Example usage
-input_channels = 1
-latent_dim = 128
-output_channels = 1
-IMG_SIZE = 64
-SEQ_LEN = 10
-from convlstm import ConvLSTMCell
-import numpy as np
-class DoubleConv(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(DoubleConv, self).__init__()
-        self.double_conv = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True)
-        )
-
-    def forward(self, x):
-        return self.double_conv(x)
-
-class UNet(nn.Module):
-    def __init__(self, input_channels, output_channels):
-        super(UNet, self).__init__()
-        self.in_channels = input_channels
-        self.out_channels = output_channels
-
-        self.enc1 = DoubleConv(input_channels, 64)
-        self.enc2 = DoubleConv(64, 128)
-        self.enc3 = DoubleConv(128, 256)
-        self.enc4 = DoubleConv(256, 512)
-        self.enc5 = DoubleConv(512, 1024)
-
-        self.pool = nn.MaxPool2d(2)
-
-        self.up4 = nn.ConvTranspose2d(1024, 512, kernel_size=2, stride=2)
-        self.dec4 = DoubleConv(1024, 512)
-        self.up3 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
-        self.dec3 = DoubleConv(512, 256)
-        self.up2 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
-        self.dec2 = DoubleConv(256, 128)
-        self.up1 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
-        self.dec1 = DoubleConv(128, 64)
-
-        self.final_conv = nn.Conv2d(64, output_channels, kernel_size=1)
-
-    def forward(self, x):
-        enc1 = self.enc1(x)
-        enc2 = self.enc2(self.pool(enc1))
-        enc3 = self.enc3(self.pool(enc2))
-        enc4 = self.enc4(self.pool(enc3))
-        enc5 = self.enc5(self.pool(enc4))
-
-        dec4 = self.up4(enc5)
-        dec4 = torch.cat((dec4, enc4), dim=1)
-        dec4 = self.dec4(dec4)
-        dec3 = self.up3(dec4)
-        dec3 = torch.cat((dec3, enc3), dim=1)
-        dec3 = self.dec3(dec3)
-        dec2 = self.up2(dec3)
-        dec2 = torch.cat((dec2, enc2), dim=1)
-        dec2 = self.dec2(dec2)
-        dec1 = self.up1(dec2)
-        dec1 = torch.cat((dec1, enc1), dim=1)
-        dec1 = self.dec1(dec1)
-
-        return self.final_conv(dec1)
-
-class DiffusionModel(nn.Module):
+# our proposed model:
+class VAEP(nn.Module):
     def __init__(self, input_channels, latent_dim, output_channels):
-        super(DiffusionModel, self).__init__()
+        super(VAEP, self).__init__()
         # parameters:
         self.input_channels = input_channels
         self.latent_dim = latent_dim
         self.output_channels = output_channels
-        self.z_w = int(np.sqrt(latent_dim // 2))
+        self.z_w = int(np.sqrt(latent_dim//2))
 
         # Constants
-        num_hiddens = 128
-
+        num_hiddens = 128 
+        num_residual_hiddens = 64 
+        num_residual_layers = 2
+        embedding_dim = 2 
+    
         # prediction encoder:
         self._convlstm = ConvLSTMCell(input_dim=self.input_channels,
-                                      hidden_dim=num_hiddens // 4,
-                                      kernel_size=(3, 3),
-                                      bias=True)
+                                    hidden_dim=num_hiddens//4,
+                                    kernel_size=(3, 3),
+                                    bias=True)
+        self._encoder = VAE_Encoder(num_hiddens//4)
 
-        # UNet-based noise predictor and decoder
-        self._noise_predictor = UNet(input_channels=(num_hiddens // 4) + 1, output_channels=num_hiddens // 4)
-        self._decoder = UNet(input_channels=num_hiddens // 4, output_channels=self.output_channels)
+        # decoder:
+        self._decoder_z_mu = nn.ConvTranspose2d(in_channels=embedding_dim, 
+                                    out_channels=num_hiddens,
+                                    kernel_size=1, 
+                                    stride=1)
+        self._decoder = Decoder(self.output_channels,
+                                num_hiddens, 
+                                num_residual_layers, 
+                                num_residual_hiddens)
+        
 
-    def forward(self, x, t, noise=None):
+    def vae_reparameterize(self, z_mu, z_log_sd):
         """
-        Forward pass input_img through the network
+        :param mu: mean from the encoder's latent space
+        :param log_sd: log standard deviation from the encoder's latent space
+        :output: reparameterized latent variable z, Monte carlo KL divergence
         """
-        # reconstruction:
+        # reshape:
+        z_mu = z_mu.reshape(-1, self.latent_dim, 1)
+        z_log_sd = z_log_sd.reshape(-1, self.latent_dim, 1)
+        # define the z probabilities (in this case Normal for both)
+        # p(z): N(z|0,I)
+        pz = torch.distributions.Normal(loc=torch.zeros_like(z_mu), scale=torch.ones_like(z_log_sd))
+        # q(z|x,phi): N(z|mu, z_var)
+        qz_x = torch.distributions.Normal(loc=z_mu, scale=torch.exp(z_log_sd))
+
+        # repameterization trick: z = z_mu + xi (*) z_log_var, xi~N(xi|0,I)
+        z = qz_x.rsample()
+        # Monte Carlo KL divergence: MCKL(p(z)||q(z|x,phi)) = log(p(z)) - log(q(z|x,phi))
+        # sum over weight dim, leaves the batch dim 
+        kl_divergence = (pz.log_prob(z) - qz_x.log_prob(z)).sum(dim=1)
+        kl_loss = -kl_divergence.mean()
+
+        return z, kl_loss 
+
+    def forward(self, x):
+        """
+        Forward pass `input_img` through the network
+        """
+        # reconstruction: 
         # encode:
         # input reshape:
+        print(x.size())
         x = x.reshape(-1, SEQ_LEN, 1, IMG_SIZE, IMG_SIZE)
+        print(x.size())
         # find size of different input dimensions
         b, seq_len, c, h, w = x.size()
         # llc: b = batch size, seq_len = sequence length, c = channel, h = height, w = width
-
-        # encode:
+        
+        # encode: 
         # initialize hidden states
         h_enc, enc_state = self._convlstm.init_hidden(batch_size=b, image_size=(h, w))
-        for t_step in range(seq_len):
-            x_in = x[:, t_step]
+        for t in range(seq_len): 
+            x_in = x[:,t]
             h_enc, enc_state = self._convlstm(input_tensor=x_in,
                                               cur_state=[h_enc, enc_state])
         # llc: this is output of the lstm, which is the input to the encoder
         enc_in = h_enc
+        
+        # output of the encoder:
+        z_mu, z_log_sd = self._encoder(enc_in)
 
-        # add noise
-        if noise is None:
-            noise = torch.randn_like(enc_in)
-        z_noisy = enc_in + noise
-
-        # prepare time step encoding
-        t = t.view(b, 1, 1, 1).repeat(1, 1, h, w)  # Repeat the time step for concatenation
-        z_noisy = torch.cat([z_noisy, t], dim=1)
-
-        # predict noise
-        z_predicted = self._noise_predictor(z_noisy)
-
-        # denoise
-        z_denoised = enc_in - z_predicted
-
+        # get the latent vector through reparameterization:
+        z, kl_loss = self.vae_reparameterize(z_mu, z_log_sd)
+    
         # decode:
-        prediction = self._decoder(z_denoised)
-        prediction = torch.sigmoid(prediction)
-        return prediction
+        # reshape:
+        z = z.reshape(-1, 2, self.z_w, self.z_w)
+        x_d = self._decoder_z_mu(z)
+        prediction = self._decoder(x_d)
+
+        return prediction, kl_loss
+
+#
+# end of class
+
+#
+# end of file
+
+class DiffusionModel(nn.Module):
+    def __init__(self, input_channels, model_channels, num_diffusion_timesteps):
+        super(DiffusionModel, self).__init__()
+        self.num_diffusion_timesteps = num_diffusion_timesteps
+        self.model_channels = model_channels
+
+        # Define the model here, using input_channels and model_channels
+        self.conv1 = nn.Conv2d(input_channels, model_channels, 3, padding=1)
+        self.conv2 = nn.Conv2d(model_channels, model_channels, 3, padding=1)
+        self.conv3 = nn.Conv2d(model_channels, input_channels, 3, padding=1)
+
+    def forward(self, x, t):
+        """ Forward pass computes q(x_t | x_{t-1}) and p(x_{t-1} | x_t) """
+        # Adding time information as a form of conditioning:
+        tt = torch.ones_like(x[:, :1, :, :]) * (t / self.num_diffusion_timesteps)
+        x = torch.cat([x, tt], dim=1)
+        
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        return self.conv3(x)
+
+    def q_sample(self, x_start, t, noise=None):
+        """ Sample x_t given x_0 using the variance schedule """
+        if noise is None:
+            noise = torch.randn_like(x_start)
+        return x_start + torch.sqrt(torch.tensor(1.0 / self.num_diffusion_timesteps)) * noise
+
+    def p_sample(self, x, t):
+        """ Sample x_{t-1} given x_t """
+        return self.forward(x, t)
+
+# Constants for diffusion model
+NUM_INPUT_CHANNELS = 1  # Adjust as per your input
+MODEL_CHANNELS = 64
+NUM_DIFFUSION_TIMESTEPS = 1000
+
+class VAEP_Diffusion(nn.Module):
+    def __init__(self, input_channels, output_channels):
+        super(VAEP_Diffusion, self).__init__()
+        self.input_channels = input_channels
+        self.output_channels = output_channels
+
+        # Integration of Diffusion Model
+        self.diffusion_model = DiffusionModel(input_channels, MODEL_CHANNELS, NUM_DIFFUSION_TIMESTEPS)
+        self.convlstm = ConvLSTMCell(input_dim=self.input_channels, hidden_dim=MODEL_CHANNELS, kernel_size=(3, 3), bias=True)
+
+    def forward(self, x):
+        # Initial processing
+        b, seq_len, c, h, w = x.size()
+        h_enc, enc_state = self.convlstm.init_hidden(batch_size=b, image_size=(h, w))
+        
+        for t in range(seq_len):
+            x_in = x[:, t]
+            h_enc, enc_state = self.convlstm(input_tensor=x_in, cur_state=[h_enc, enc_state])
+
+        # Apply diffusion process
+        t = torch.randint(0, NUM_DIFFUSION_TIMESTEPS, (1,)).item()
+        return self.diffusion_model.p_sample(h_enc, t)

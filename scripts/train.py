@@ -97,70 +97,66 @@ def train(model, dataloader, dataset, device, optimizer, criterion, epoch, epoch
     model.train()
     # for each batch in increments of batch size:
     running_loss = 0.0
-    # kl_divergence:
-    kl_avg_loss = 0.0
-    # CE loss:
     ce_avg_loss = 0.0
 
     counter = 0
     # get the number of batches (ceiling of train_data/batch_size):
-    num_batches = int(len(dataset)/dataloader.batch_size)
+    num_batches = int(len(dataset) / dataloader.batch_size)
     for i, batch in tqdm(enumerate(dataloader), total=num_batches):
-    #for i, batch in enumerate(dataloader, 0):
         counter += 1
         # collect the samples as a batch:
-        scans = batch['scan']
-        scans = scans.to(device)
-        positions = batch['position']
-        positions = positions.to(device)
-        velocities = batch['velocity']
-        velocities = velocities.to(device)
+        scans = batch['scan'].to(device)
+        positions = batch['position'].to(device)
+        velocities = batch['velocity'].to(device)
 
         # create occupancy maps:
         batch_size = scans.size(0)
 
         # Create mask grid maps:
-        mask_gridMap = LocalMap(X_lim = MAP_X_LIMIT, 
-                        Y_lim = MAP_Y_LIMIT, 
-                        resolution = RESOLUTION, 
-                        p = P_prior,
-                        size=[batch_size, SEQ_LEN],
-                        device = device)
+        mask_gridMap = LocalMap(X_lim=MAP_X_LIMIT,
+                                Y_lim=MAP_Y_LIMIT,
+                                resolution=RESOLUTION,
+                                p=P_prior,
+                                size=[batch_size, SEQ_LEN],
+                                device=device)
+
         # robot positions:
         x_odom = torch.zeros(batch_size, SEQ_LEN).to(device)
         y_odom = torch.zeros(batch_size, SEQ_LEN).to(device)
         theta_odom = torch.zeros(batch_size, SEQ_LEN).to(device)
         # Lidar measurements:
-        distances = scans[:,SEQ_LEN:]
+        distances = scans[:, SEQ_LEN:]
+
         # the angles of lidar scan: -135 ~ 135 degree
-        angles = torch.linspace(-(135*np.pi/180), 135*np.pi/180, distances.shape[-1]).to(device)
+        angles = torch.linspace(-(135 * np.pi / 180), 135 * np.pi / 180, distances.shape[-1]).to(device)
         # Lidar measurements in X-Y plane: transform to the predicted robot reference frame
         distances_x, distances_y = mask_gridMap.lidar_scan_xy(distances, angles, x_odom, y_odom, theta_odom)
         # discretize to binary maps:
         mask_binary_maps = mask_gridMap.discretize(distances_x, distances_y)
-        
-        # Create input grid maps: 
-        input_gridMap = LocalMap(X_lim = MAP_X_LIMIT, 
-                    Y_lim = MAP_Y_LIMIT, 
-                    resolution = RESOLUTION, 
-                    p = P_prior,
-                    size=[batch_size, SEQ_LEN],
-                    device = device)
-        # current position and velocities: 
-        obs_pos_N = positions[:, SEQ_LEN-1]
-        vel_N = velocities[:, SEQ_LEN-1]
+
+        # Create input grid maps:
+        input_gridMap = LocalMap(X_lim=MAP_X_LIMIT,
+                                 Y_lim=MAP_Y_LIMIT,
+                                 resolution=RESOLUTION,
+                                 p=P_prior,
+                                 size=[batch_size, SEQ_LEN],
+                                 device=device)
+        # current position and velocities:
+        obs_pos_N = positions[:, SEQ_LEN - 1]
+        vel_N = velocities[:, SEQ_LEN - 1]
         # Predict the future origin pose of the robot:
-        T = 1 
-        noise_std = [0, 0, 0] #[0.00111, 0.00112, 0.02319]
+        T = 1
+        noise_std = [0, 0, 0]
         pos_origin = input_gridMap.origin_pose_prediction(vel_N, obs_pos_N, T, noise_std)
         # robot positions:
-        pos = positions[:,:SEQ_LEN]
+        pos = positions[:, :SEQ_LEN]
+
         # Transform the robot past poses to the predicted reference frame.
-        x_odom, y_odom, theta_odom =  input_gridMap.robot_coordinate_transform(pos, pos_origin)
+        x_odom, y_odom, theta_odom = input_gridMap.robot_coordinate_transform(pos, pos_origin)
         # Lidar measurements:
-        distances = scans[:,:SEQ_LEN]
+        distances = scans[:, :SEQ_LEN]
         # the angles of lidar scan: -135 ~ 135 degree
-        angles = torch.linspace(-(135*np.pi/180), 135*np.pi/180, distances.shape[-1]).to(device)
+        angles = torch.linspace(-(135 * np.pi / 180), 135 * np.pi / 180, distances.shape[-1]).to(device)
         # Lidar measurements in X-Y plane: transform to the predicted robot reference frame
         distances_x, distances_y = input_gridMap.lidar_scan_xy(distances, angles, x_odom, y_odom, theta_odom)
         # discretize to binary maps:
@@ -173,36 +169,33 @@ def train(model, dataloader, dataset, device, optimizer, criterion, epoch, epoch
         # set all gradients to 0:
         optimizer.zero_grad()
         # feed the batch to the network:
-        prediction, kl_loss = model(input_binary_maps)
+
+        t = torch.randint(0, 1000, (batch_size,)).to(device)  # Random time steps
+        prediction = model(input_binary_maps, t)
+        # llc: input_binary_maps: torch.Size([128, 10, 1, 64, 64])
+        # llc: prediction: torch.Size([128, 1, 64, 64])
+
         # calculate the total loss:
-        ce_loss = criterion(prediction, mask_binary_maps[:,0]).div(batch_size)
-        # beta-vae:
-        loss = ce_loss + BETA*kl_loss
+        ce_loss = criterion(prediction, mask_binary_maps[:, 0]).div(batch_size)
         # perform back propagation:
-        loss.backward(torch.ones_like(loss))
+        ce_loss.backward()
         optimizer.step()
         # get the loss:
-        # multiple GPUs:
         if torch.cuda.device_count() > 1:
-            loss = loss.mean()  
             ce_loss = ce_loss.mean()
-            kl_loss = kl_loss.mean()
 
-        running_loss += loss.item()
-        # kl_divergence:
-        kl_avg_loss += kl_loss.item()
-        # CE loss:
+        running_loss += ce_loss.item()
         ce_avg_loss += ce_loss.item()
 
         # display informational message:
-        if(i % 128 == 0):
-            print('Epoch [{}/{}], Step[{}/{}], Loss: {:.4f}, CE_Loss: {:.4f}, KL_Loss: {:.4f}'
-                    .format(epoch, epochs, i + 1, num_batches, loss.item(), ce_loss.item(), kl_loss.item()))
-    train_loss = running_loss / counter 
-    train_kl_loss = kl_avg_loss / counter
+        if (i % 128 == 0):
+            print('Epoch [{}/{}], Step[{}/{}], CE_Loss: {:.4f}'
+                  .format(epoch, epochs, i + 1, num_batches, ce_loss.item()))
+    train_loss = running_loss / counter
     train_ce_loss = ce_avg_loss / counter
 
-    return train_loss, train_kl_loss, train_ce_loss
+    return train_loss, train_ce_loss
+
 
 # validate function:
 def validate(model, dataloader, dataset, device, criterion):
@@ -210,71 +203,64 @@ def validate(model, dataloader, dataset, device, criterion):
     model.eval()
     # for each batch in increments of batch size:
     running_loss = 0.0
-    # kl_divergence:
-    kl_avg_loss = 0.0
-    # CE loss:
     ce_avg_loss = 0.0
 
     counter = 0
     # get the number of batches (ceiling of train_data/batch_size):
-    num_batches = int(len(dataset)/dataloader.batch_size)
+    num_batches = int(len(dataset) / dataloader.batch_size)
     with torch.no_grad():
         for i, batch in tqdm(enumerate(dataloader), total=num_batches):
-        #for i, batch in enumerate(dataloader, 0):
             counter += 1
             # collect the samples as a batch:
-            scans = batch['scan']
-            scans = scans.to(device)
-            positions = batch['position']
-            positions = positions.to(device)
-            velocities = batch['velocity']
-            velocities = velocities.to(device)
+            scans = batch['scan'].to(device)
+            positions = batch['position'].to(device)
+            velocities = batch['velocity'].to(device)
 
             # create occupancy maps:
             batch_size = scans.size(0)
 
             # Create mask grid maps:
-            mask_gridMap = LocalMap(X_lim = MAP_X_LIMIT, 
-                            Y_lim = MAP_Y_LIMIT, 
-                            resolution = RESOLUTION, 
-                            p = P_prior,
-                            size=[batch_size, SEQ_LEN],
-                            device = device)
+            mask_gridMap = LocalMap(X_lim=MAP_X_LIMIT,
+                                    Y_lim=MAP_Y_LIMIT,
+                                    resolution=RESOLUTION,
+                                    p=P_prior,
+                                    size=[batch_size, SEQ_LEN],
+                                    device=device)
             # robot positions:
             x_odom = torch.zeros(batch_size, SEQ_LEN).to(device)
             y_odom = torch.zeros(batch_size, SEQ_LEN).to(device)
             theta_odom = torch.zeros(batch_size, SEQ_LEN).to(device)
             # Lidar measurements:
-            distances = scans[:,SEQ_LEN:]
+            distances = scans[:, SEQ_LEN:]
             # the angles of lidar scan: -135 ~ 135 degree
-            angles = torch.linspace(-(135*np.pi/180), 135*np.pi/180, distances.shape[-1]).to(device)
+            angles = torch.linspace(-(135 * np.pi / 180), 135 * np.pi / 180, distances.shape[-1]).to(device)
             # Lidar measurements in X-Y plane: transform to the predicted robot reference frame
             distances_x, distances_y = mask_gridMap.lidar_scan_xy(distances, angles, x_odom, y_odom, theta_odom)
             # discretize to binary maps:
             mask_binary_maps = mask_gridMap.discretize(distances_x, distances_y)
-            
-            # Create input grid maps: 
-            input_gridMap = LocalMap(X_lim = MAP_X_LIMIT, 
-                        Y_lim = MAP_Y_LIMIT, 
-                        resolution = RESOLUTION, 
-                        p = P_prior,
-                        size=[batch_size, SEQ_LEN],
-                        device = device)
-            # current position and velocities: 
-            obs_pos_N = positions[:, SEQ_LEN-1]
-            vel_N = velocities[:, SEQ_LEN-1]
-            # Predict the future origin pose of the robot: n+1 
-            T = 1 
-            noise_std = [0, 0, 0] #[0.00111, 0.00112, 0.02319]
+
+            # Create input grid maps:
+            input_gridMap = LocalMap(X_lim=MAP_X_LIMIT,
+                                     Y_lim=MAP_Y_LIMIT,
+                                     resolution=RESOLUTION,
+                                     p=P_prior,
+                                     size=[batch_size, SEQ_LEN],
+                                     device=device)
+            # current position and velocities:
+            obs_pos_N = positions[:, SEQ_LEN - 1]
+            vel_N = velocities[:, SEQ_LEN - 1]
+            # Predict the future origin pose of the robot: n+1
+            T = 1
+            noise_std = [0, 0, 0]
             pos_origin = input_gridMap.origin_pose_prediction(vel_N, obs_pos_N, T, noise_std)
             # robot positions:
-            pos = positions[:,:SEQ_LEN]
+            pos = positions[:, :SEQ_LEN]
             # Transform the robot past poses to the predicted reference frame.
-            x_odom, y_odom, theta_odom =  input_gridMap.robot_coordinate_transform(pos, pos_origin)
+            x_odom, y_odom, theta_odom = input_gridMap.robot_coordinate_transform(pos, pos_origin)
             # Lidar measurements:
-            distances = scans[:,:SEQ_LEN]
+            distances = scans[:, :SEQ_LEN]
             # the angles of lidar scan: -135 ~ 135 degree
-            angles = torch.linspace(-(135*np.pi/180), 135*np.pi/180, distances.shape[-1]).to(device)
+            angles = torch.linspace(-(135 * np.pi / 180), 135 * np.pi / 180, distances.shape[-1]).to(device)
             # Lidar measurements in X-Y plane: transform to the predicted robot reference frame
             distances_x, distances_y = input_gridMap.lidar_scan_xy(distances, angles, x_odom, y_odom, theta_odom)
             # discretize to binary maps:
@@ -285,101 +271,59 @@ def validate(model, dataloader, dataset, device, criterion):
             mask_binary_maps = mask_binary_maps.unsqueeze(2)
 
             # feed the batch to the network:
-            prediction, kl_loss= model(input_binary_maps)
+            t = torch.randint(0, 1000, (batch_size,)).to(device)  # Random time steps
+            prediction = model(input_binary_maps, t)
             # calculate the total loss:
-            ce_loss = criterion(prediction, mask_binary_maps[:,0]).div(batch_size)
-            # beta-vae:
-            loss = ce_loss + BETA*kl_loss
-            # multiple GPUs:
+            ce_loss = criterion(prediction, mask_binary_maps[:, 0]).div(batch_size)
             if torch.cuda.device_count() > 1:
-                loss = loss.mean()
                 ce_loss = ce_loss.mean()
-                kl_loss = kl_loss.mean()
 
             # get the loss:
-            running_loss += loss.item()
-            # kl_divergence:
-            kl_avg_loss += kl_loss.item()
-            # CE loss:
+            running_loss += ce_loss.item()
             ce_avg_loss += ce_loss.item()
 
     val_loss = running_loss / counter
-    val_kl_loss = kl_avg_loss / counter
     val_ce_loss = ce_avg_loss / counter
 
-    return val_loss, val_kl_loss, val_ce_loss
+    return val_loss, val_ce_loss
 
-#------------------------------------------------------------------------------
-#
-# the main program starts here
-#
-#------------------------------------------------------------------------------
-
-# function: main
-#
-# arguments: none
-#
-# return: none
-#
-# This method is the main function.
-#
+# main program starts here
 def main(argv):
-    # ensure we have the correct amount of arguments:
-    #global cur_batch_win
-    if(len(argv) != NUM_ARGS):
+    if len(argv) != NUM_ARGS:
         print("usage: python train.py [MDL_PATH] [TRAIN_PATH] [VAL_PATH]")
         exit(-1)
 
-    # define local variables:
     mdl_path = argv[0]
     pTrain = argv[1]
     pDev = argv[2]
 
-    # get the output directory name:
     odir = os.path.dirname(mdl_path)
-
-    # if the odir doesn't exits, we make it:
     if not os.path.exists(odir):
         os.makedirs(odir)
 
-    # set the device to use GPU if available:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     print('...Start reading data...')
-    ### training data ###
-    # training set and training data loader
     train_dataset = VaeTestDataset(pTrain, 'train')
-    train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=BATCH_SIZE, num_workers=4, \
+    train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=BATCH_SIZE, num_workers=4,
                                                    shuffle=True, drop_last=True, pin_memory=True)
 
-    ### validation data ###
-    # validation set and validation data loader
     dev_dataset = VaeTestDataset(pDev, 'val')
-    dev_dataloader = torch.utils.data.DataLoader(dev_dataset, batch_size=BATCH_SIZE, num_workers=2, \
+    dev_dataloader = torch.utils.data.DataLoader(dev_dataset, batch_size=BATCH_SIZE, num_workers=2,
                                                  shuffle=True, drop_last=True, pin_memory=True)
 
-    # instantiate a model:
-    model = VAEP(input_channels=NUM_INPUT_CHANNELS,
-                  latent_dim=NUM_LATENT_DIM,
-                  output_channels=NUM_OUTPUT_CHANNELS)
-    # moves the model to device (cpu in our case so no change):
+    model = DiffusionModel(input_channels=NUM_INPUT_CHANNELS,
+                           latent_dim=NUM_LATENT_DIM,
+                           output_channels=NUM_OUTPUT_CHANNELS)
     model.to(device)
 
-    # set the adam optimizer parameters:
-    opt_params = { LEARNING_RATE: 0.001,
-                   BETAS: (.9,0.999),
-                   EPS: 1e-08,
-                   WEIGHT_DECAY: .001 }
-    # set the loss criterion and optimizer:
-    criterion = nn.BCELoss(reduction='sum') #, weight=class_weights)
+    opt_params = {'lr': 0.001, 'betas': (0.9, 0.999), 'eps': 1e-08, 'weight_decay': 0.001}
+    criterion = nn.BCELoss(reduction='sum')
     criterion.to(device)
-    # create an optimizer, and pass the model params to it:
     optimizer = Adam(model.parameters(), **opt_params)
 
-    # get the number of epochs to train on:
     epochs = NUM_EPOCHS
 
-    # if there are trained models, continue training:
     if os.path.exists(mdl_path):
         checkpoint = torch.load(mdl_path)
         model.load_state_dict(checkpoint['model'])
@@ -390,74 +334,39 @@ def main(argv):
         start_epoch = 0
         print('No trained models, restart training')
 
-    # multiple GPUs:
     if torch.cuda.device_count() > 1:
-        print("Let's use 2 of total", torch.cuda.device_count(), "GPUs!")
-        # dim = 0 [30, xxx] -> [10, ...], [10, ...], [10, ...] on 3 GPUs
-        model = nn.DataParallel(model) #, device_ids=[0, 1])
-    # moves the model to device (cpu in our case so no change):
+        print("Let's use", torch.cuda.device_count(), "GPUs!")
+        model = nn.DataParallel(model)
     model.to(device)
 
-    # tensorboard writer:
     writer = SummaryWriter('runs')
 
-    epoch_num = 0
-    for epoch in range(start_epoch+1, epochs):
-        # adjust learning rate:
+    for epoch in range(start_epoch + 1, epochs):
         adjust_learning_rate(optimizer, epoch)
-        ################################## Train #####################################
-        # for each batch in increments of batch size
-        #
-        train_epoch_loss, train_kl_epoch_loss, train_ce_epoch_loss = train(
+        train_epoch_loss, train_ce_epoch_loss = train(
             model, train_dataloader, train_dataset, device, optimizer, criterion, epoch, epochs
         )
-        valid_epoch_loss, valid_kl_epoch_loss, valid_ce_epoch_loss = validate(
+        valid_epoch_loss, valid_ce_epoch_loss = validate(
             model, dev_dataloader, dev_dataset, device, criterion
         )
-        
-        # log the epoch loss
-        writer.add_scalar('training loss',
-                        train_epoch_loss,
-                        epoch)
-        writer.add_scalar('training kl loss',
-                        train_kl_epoch_loss,
-                        epoch)
-        writer.add_scalar('training ce loss',
-                train_ce_epoch_loss,
-                epoch)
-        writer.add_scalar('validation loss',
-                        valid_epoch_loss,
-                        epoch)
-        writer.add_scalar('validation kl loss',
-                        valid_kl_epoch_loss,
-                        epoch)
-        writer.add_scalar('validation ce loss',
-                        valid_ce_epoch_loss,
-                        epoch)
+
+        writer.add_scalar('training loss', train_epoch_loss, epoch)
+        writer.add_scalar('training ce loss', train_ce_epoch_loss, epoch)
+        writer.add_scalar('validation loss', valid_epoch_loss, epoch)
+        writer.add_scalar('validation ce loss', valid_ce_epoch_loss, epoch)
 
         print('Train set: Average loss: {:.4f}'.format(train_epoch_loss))
         print('Validation set: Average loss: {:.4f}'.format(valid_epoch_loss))
-        
-        # save the model:
-        if(epoch % 10 == 0):
-            if torch.cuda.device_count() > 1: # multiple GPUS: 
-                state = {'model':model.module.state_dict(), 'optimizer':optimizer.state_dict(), 'epoch':epoch}
-            else:
-                state = {'model':model.state_dict(), 'optimizer':optimizer.state_dict(), 'epoch':epoch}
-            path='./model/model' + str(epoch) +'.pth'
+
+        if epoch % 10 == 0:
+            state = {'model': model.module.state_dict() if torch.cuda.device_count() > 1 else model.state_dict(),
+                     'optimizer': optimizer.state_dict(), 'epoch': epoch}
+            path = './model/model' + str(epoch) + '.pth'
             torch.save(state, path)
 
-        epoch_num = epoch
-
-    # save the final model
-    if torch.cuda.device_count() > 1: # multiple GPUS: 
-        state = {'model':model.module.state_dict(), 'optimizer':optimizer.state_dict(), 'epoch':epoch_num}
-    else:
-        state = {'model':model.state_dict(), 'optimizer':optimizer.state_dict(), 'epoch':epoch_num}
+    state = {'model': model.module.state_dict() if torch.cuda.device_count() > 1 else model.state_dict(),
+             'optimizer': optimizer.state_dict(), 'epoch': epoch}
     torch.save(state, mdl_path)
-
-    # exit gracefully
-    #
 
     return True
 #
