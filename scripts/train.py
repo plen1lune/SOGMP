@@ -49,7 +49,7 @@ import os
 model_dir = './model/model.pth'  # the path of model storage 
 NUM_ARGS = 3
 NUM_EPOCHS = 50 #100
-BATCH_SIZE = 128 #512 #64
+BATCH_SIZE = 64 #128 #512 
 LEARNING_RATE = "lr"
 BETAS = "betas"
 EPS = "eps"
@@ -188,7 +188,7 @@ def train(model, dataloader, dataset, device, optimizer, criterion, epoch, epoch
         ce_avg_loss += ce_loss.item()
 
         # display informational message:
-        if (i % 128 == 0):
+        if (i % 256 == 0):
             print('Epoch [{}/{}], Step[{}/{}], CE_Loss: {:.4f}'
                   .format(epoch, epochs, i + 1, num_batches, ce_loss.item()))
     train_loss = running_loss / counter
