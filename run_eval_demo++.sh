@@ -38,7 +38,7 @@ DL_OUT="$DL_EXP/output";
 #
 #DL_TRAIN_ODIR="$DL_OUT/00_train";
 DL_TRAIN_ODIR="$DL_EXP/model";
-DL_MDL_PATH="$DL_TRAIN_ODIR/model.pth";
+DL_MDL_PATH="$DL_TRAIN_ODIR/model20.pth";
 
 # evaluate each data set that was specified
 #

@@ -253,7 +253,7 @@ def main(argv):
                 a.set_title(input_title, fontdict={'fontsize': fontsize})
             input_img_name = "./output/pred" + str(i)+ ".jpg"
             plt.savefig(input_img_name)
-            plt.show()
+            # plt.show()
 
             print(i)
         
