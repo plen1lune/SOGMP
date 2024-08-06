@@ -1,0 +1,4 @@
+# ignore output folder
+output*/
+model*/
+runs*/
