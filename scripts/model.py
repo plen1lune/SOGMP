@@ -381,7 +381,31 @@ class UNet(nn.Module):
         dec1 = self.dec1(dec1)
 
         return self.final_conv(dec1)
+class ShallowUNet(nn.Module):
+    def __init__(self, input_channels, output_channels):
+        super(ShallowUNet, self).__init__()
+        self.in_channels = input_channels
+        self.out_channels = output_channels
 
+        self.enc1 = DoubleConv(input_channels, 32)
+        self.enc2 = DoubleConv(32, 64)
+
+        self.pool = nn.MaxPool2d(2)
+
+        self.up1 = nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2)
+        self.dec1 = DoubleConv(64, 32)
+        self.final_conv = nn.Conv2d(32, output_channels, kernel_size=1)
+
+    def forward(self, x):
+        enc1 = self.enc1(x)
+        enc2 = self.enc2(self.pool(enc1))
+
+        dec1 = self.up1(enc2)
+        dec1 = torch.cat((dec1, enc1), dim=1)
+        dec1 = self.dec1(dec1)
+
+        return self.final_conv(dec1)
+    
 class DiffusionModel(nn.Module):
     def __init__(self, input_channels, latent_dim, output_channels):
         super(DiffusionModel, self).__init__()
@@ -401,8 +425,10 @@ class DiffusionModel(nn.Module):
                                       bias=True)
 
         # UNet-based noise predictor and decoder
-        self._noise_predictor = UNet(input_channels=(num_hiddens // 4) + 1, output_channels=num_hiddens // 4)
-        self._decoder = UNet(input_channels=num_hiddens // 4, output_channels=self.output_channels)
+        # self._noise_predictor = UNet(input_channels=(num_hiddens // 4) + 1, output_channels=num_hiddens // 4)
+        # self._decoder = UNet(input_channels=num_hiddens // 4, output_channels=self.output_channels)
+        self._noise_predictor = ShallowUNet(input_channels=(num_hiddens // 4) + 1, output_channels=num_hiddens // 4)
+        self._decoder = ShallowUNet(input_channels=num_hiddens // 4, output_channels=self.output_channels)
 
     def forward(self, x, t, noise=None):
         """
